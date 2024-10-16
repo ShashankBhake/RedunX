@@ -1,12 +1,44 @@
+// src/main.rs
+use env_logger;
+use log::info;
 use regex::Regex;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE};
+use serde::Deserialize;
 use serde_json::Value;
 use std::env;
 use std::error::Error;
+use std::fmt;
+use warp::reject::Reject;
+use warp::Filter;
 
-async fn get_analysis_id(input_url: &str) -> Result<String, Box<dyn Error>> {
+#[derive(Deserialize)]
+struct UrlQuery {
+    url: String,
+}
+
+// Custom error type
+#[derive(Debug)]
+struct CustomError {
+    message: String,
+}
+
+impl fmt::Display for CustomError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl Error for CustomError {}
+
+impl Reject for CustomError {}
+
+async fn get_analysis_id(input_url: &str) -> Result<String, warp::Rejection> {
     let url = "https://www.virustotal.com/api/v3/urls";
-    let api_key = env::var("API_KEY").expect("API_KEY must be set");
+    let api_key = env::var("API_KEY").map_err(|e| {
+        warp::reject::custom(CustomError {
+            message: e.to_string(),
+        })
+    })?;
 
     let mut headers = HeaderMap::new();
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
@@ -14,7 +46,14 @@ async fn get_analysis_id(input_url: &str) -> Result<String, Box<dyn Error>> {
         CONTENT_TYPE,
         HeaderValue::from_static("application/x-www-form-urlencoded"),
     );
-    headers.insert("x-apikey", HeaderValue::from_str(&api_key)?);
+    headers.insert(
+        "x-apikey",
+        HeaderValue::from_str(&api_key).map_err(|e| {
+            warp::reject::custom(CustomError {
+                message: e.to_string(),
+            })
+        })?,
+    );
 
     let client = reqwest::Client::new();
     let response = client
@@ -22,13 +61,25 @@ async fn get_analysis_id(input_url: &str) -> Result<String, Box<dyn Error>> {
         .headers(headers)
         .body(format!("url={}", input_url))
         .send()
-        .await?
+        .await
+        .map_err(|e| {
+            warp::reject::custom(CustomError {
+                message: e.to_string(),
+            })
+        })?
         .text()
-        .await?;
+        .await
+        .map_err(|e| {
+            warp::reject::custom(CustomError {
+                message: e.to_string(),
+            })
+        })?;
 
-    let json: Value = serde_json::from_str(&response)?;
-    // println!("{}", json);
-    // println!("id: {}", json["data"]["id"]);
+    let json: Value = serde_json::from_str(&response).map_err(|e| {
+        warp::reject::custom(CustomError {
+            message: e.to_string(),
+        })
+    })?;
     if let Some(id) = json["data"]["id"].as_str() {
         let re = Regex::new(r"u-([a-f0-9]{64})-").unwrap();
         if let Some(captures) = re.captures(id) {
@@ -37,25 +88,29 @@ async fn get_analysis_id(input_url: &str) -> Result<String, Box<dyn Error>> {
             }
         }
     }
-    Err("64-character hexadecimal part not found".into())
+    Err(warp::reject::custom(CustomError {
+        message: "64-character hexadecimal part not found".to_string(),
+    }))
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    let api_key = env::var("API_KEY").expect("API_KEY must be set");
-    println!("Enter the URL to check:");
-    let mut input_url = String::new();
-    std::io::stdin().read_line(&mut input_url)?;
-    let input_url = input_url.trim();
-    let analysis_id = get_analysis_id(input_url).await?;
-    println!("Analysis ID: {}", analysis_id);
-    println!("Fetching analysis result...");
-
+async fn fetch_analysis_result(analysis_id: &str) -> Result<String, warp::Rejection> {
+    let api_key = env::var("API_KEY").map_err(|e| {
+        warp::reject::custom(CustomError {
+            message: e.to_string(),
+        })
+    })?;
     let url = format!("https://www.virustotal.com/api/v3/urls/{}", analysis_id);
 
     let mut headers = HeaderMap::new();
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-    headers.insert("x-apikey", HeaderValue::from_str(&api_key)?);
+    headers.insert(
+        "x-apikey",
+        HeaderValue::from_str(&api_key).map_err(|e| {
+            warp::reject::custom(CustomError {
+                message: e.to_string(),
+            })
+        })?,
+    );
 
     let client = reqwest::Client::new();
     let max_retries = 20;
@@ -66,39 +121,68 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .get(&url)
             .headers(headers.clone())
             .send()
-            .await?
+            .await
+            .map_err(|e| {
+                warp::reject::custom(CustomError {
+                    message: e.to_string(),
+                })
+            })?
             .text()
-            .await?;
+            .await
+            .map_err(|e| {
+                warp::reject::custom(CustomError {
+                    message: e.to_string(),
+                })
+            })?;
 
-        let json: Value = serde_json::from_str(&response)?;
+        let json: Value = serde_json::from_str(&response).map_err(|e| {
+            warp::reject::custom(CustomError {
+                message: e.to_string(),
+            })
+        })?;
         if let Some(file_info) = json["meta"]["file_info"].as_object() {
             if let Some(sha256) = file_info.get("sha256") {
-                println!("sha256: {}", sha256);
-                break;
-            } else {
-                println!("sha256 not found");
+                return Ok(sha256.as_str().unwrap().to_string());
             }
         } else if let Some(file_info) = json["data"]["attributes"].as_object() {
             if let Some(sha256) = file_info.get("last_http_response_content_sha256") {
-                println!("sha256: {}", sha256);
-                break;
-            } else {
-                println!("sha256 not found");
+                return Ok(sha256.as_str().unwrap().to_string());
             }
-        } else {
-            println!("file_info not found");
-            print!("{}", json);
         }
 
         retries += 1;
         if retries >= max_retries {
-            println!("Max retries reached. Exiting...");
-            break;
+            return Err(warp::reject::custom(CustomError {
+                message: "Max retries reached".to_string(),
+            }));
         }
 
-        println!("Retrying... ({}/{})", retries, max_retries);
         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
     }
+}
 
-    Ok(())
+async fn handle_get_hash(query: UrlQuery) -> Result<impl warp::Reply, warp::Rejection> {
+    let analysis_id = get_analysis_id(&query.url).await?;
+    let hash = fetch_analysis_result(&analysis_id).await?;
+    Ok(warp::reply::json(&hash))
+}
+
+#[tokio::main]
+async fn main() {
+    // Initialize the logger
+    env_logger::init();
+    dotenv::dotenv().ok();
+
+    // Log server start
+    info!("Starting the server...");
+
+    let get_hash = warp::path("getHash")
+        .and(warp::get())
+        .and(warp::query::<UrlQuery>())
+        .and_then(handle_get_hash);
+
+    // Log server listening status
+    info!("Server is running at http://127.0.0.1:3030");
+
+    warp::serve(get_hash).run(([127, 0, 0, 1], 3030)).await;
 }
