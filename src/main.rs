@@ -1,6 +1,4 @@
 // src/main.rs
-use env_logger;
-use log::info;
 use regex::Regex;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE};
 use serde::Deserialize;
@@ -169,20 +167,16 @@ async fn handle_get_hash(query: UrlQuery) -> Result<impl warp::Reply, warp::Reje
 
 #[tokio::main]
 async fn main() {
-    // Initialize the logger
-    env_logger::init();
     dotenv::dotenv().ok();
-
-    // Log server start
-    info!("Starting the server...");
 
     let get_hash = warp::path("getHash")
         .and(warp::get())
         .and(warp::query::<UrlQuery>())
         .and_then(handle_get_hash);
 
-    // Log server listening status
-    info!("Server is running at http://127.0.0.1:3030");
+    let ping = warp::path("ping").and(warp::get()).map(|| "pong");
 
-    warp::serve(get_hash).run(([127, 0, 0, 1], 3030)).await;
+    let routes = get_hash.or(ping);
+
+    warp::serve(routes).run(([0, 0, 0, 0], 5678)).await;
 }
