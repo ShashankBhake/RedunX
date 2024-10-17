@@ -5,7 +5,7 @@ FROM rust:1.70
 WORKDIR /usr/src/app
 
 # Copy the Cargo.toml and Cargo.lock files
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml ./
 
 # Copy the source code
 COPY src ./src
